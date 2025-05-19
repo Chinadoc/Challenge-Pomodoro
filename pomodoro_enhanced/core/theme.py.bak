@@ -1,0 +1,424 @@
+from __future__ import annotations
+
+"""Theme resolution and application utilities.
+
+`ThemeManager` wraps all color selection & ttk style setup so the rest of
+the app never directly touches hex codes.  It exposes:
+
+    >>> tm = ThemeManager(root, config)
+    >>> tm.apply(root_widgets)
+    >>> current = tm.theme  # ThemeConfig dataclass
+
+The default config values come from `pomodoro_enhanced.config`, but you
+can inject any object with matching attributes (handy for tests).
+"""
+
+from dataclasses import dataclass
+from typing import Mapping, Optional
+import logging
+
+try:
+    import darkdetect  # runtime theme detection on mac / windows
+except ImportError:  # fallback – assume light mode
+    darkdetect = None  # type: ignore
+
+import tkinter as tk
+from tkinter import ttk
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class ThemeConfig:
+    """A bag of resolved colors for the current theme."""
+
+    bg: str
+    fg: str
+    surface: str
+    primary: str
+    secondary: str
+    button_active_bg: str
+    work: str
+    brk: str  # "break" is a keyword in some linters
+
+
+class ThemeManager:
+    """Detects system theme, resolves colors, and applies ttk styles."""
+
+    def __init__(self, root: tk.Tk, config_module):
+        self._root = root
+        self._cfg = config_module
+        self.theme: ThemeConfig = self._detect_and_resolve()
+        self._style = ttk.Style()
+        self._register_ttk_styles()
+        self._initialized = True
+
+    # ---------------------------------------------------------------------
+    # Public API
+    # ---------------------------------------------------------------------
+    def apply(self, widgets: Mapping[str, tk.Widget], *, on_break: bool = False) -> None:
+        """Re‑paint tk widgets.  ttk widgets pick up styles automatically."""
+        bg = self.theme.bg
+        fg = self.theme.fg
+        timer_fg = self.theme.brk if on_break else self.theme.work
+
+        for name, w in widgets.items():
+            try:
+                if isinstance(w, tk.Frame):
+                    w.configure(bg=bg)
+                elif isinstance(w, tk.Label):
+                    w.configure(bg=bg, fg=timer_fg if name == "timer_label" else fg)
+            except tk.TclError as exc:
+                logger.debug("Widget %s could not be themed: %s", name, exc)
+
+        self._root.configure(bg=bg)
+        self._root.update_idletasks()
+
+    def update_theme(self, dark_mode: Optional[bool] = None) -> None:
+        """Update the current theme based on dark_mode preference."""
+        if dark_mode is None:
+            self.theme = self._detect_and_resolve()
+        else:
+            self.theme = self._resolve("dark" if dark_mode else "light")
+        self._register_ttk_styles()
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _detect_and_resolve(self) -> ThemeConfig:
+        mode = "light"
+        try:
+            if darkdetect and (det := darkdetect.theme()):
+                mode = det.lower()
+        except Exception:  # pragma: no cover  # defensive – darkdetect flaky on linux
+            logger.debug("darkdetect failure", exc_info=True)
+
+        logger.info("System theme detected as %s", mode)
+        return self._resolve(mode)
+
+    def _resolve(self, mode: str) -> ThemeConfig:
+        cfg = self._cfg
+        if mode == "dark":
+            return ThemeConfig(
+                bg=cfg.BACKGROUND_COLOR,
+                fg=cfg.FOREGROUND_COLOR,
+                surface=cfg.SURFACE_COLOR,
+                primary=cfg.PRIMARY_COLOR,
+                secondary=cfg.SECONDARY_COLOR,
+                button_active_bg=getattr(cfg, "BUTTON_ACTIVE_BG_DARK", "#3c3c3c"),
+                work=getattr(cfg, "WORK_COLOR_DARK", "#ff8a80"),
+                brk=getattr(cfg, "BREAK_COLOR_DARK", "#80cbc4"),
+            )
+        # light fallback
+        return ThemeConfig(
+            bg=getattr(cfg, "BACKGROUND_COLOR_LIGHT", "#f5f5f5"),
+            fg=getattr(cfg, "FOREGROUND_COLOR_LIGHT", "#212121"),
+            surface=getattr(cfg, "SURFACE_COLOR_LIGHT", "#ffffff"),
+            primary=getattr(cfg, "PRIMARY_COLOR_LIGHT", "#007bff"),
+            secondary=getattr(cfg, "SECONDARY_COLOR_LIGHT", "#ff9800"),
+            button_active_bg=getattr(cfg, "BUTTON_ACTIVE_BG_LIGHT", "#e0e0e0"),
+            work=getattr(cfg, "WORK_COLOR_LIGHT", "#d32f2f"),
+            brk=getattr(cfg, "BREAK_COLOR_LIGHT", "#00796b"),
+        )
+
+    def _register_ttk_styles(self) -> None:
+        t = self.theme
+        
+        # Configure the style
+        self._style.theme_use("clam")  # Use clam theme as base for better theming
+        
+        # Configure root styles
+        self._style.configure(
+            ".",
+            background=t.bg,
+            foreground=t.fg,
+            fieldbackground=t.surface,
+            troughcolor=t.surface,
+            selectbackground=t.primary,
+            selectforeground=t.fg,
+            insertcolor=t.fg,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        
+        # Base button style
+        self._style.configure(
+            "TButton",
+            background=t.surface,
+            foreground=t.fg,
+            font=("Helvetica", 10),
+            relief=tk.FLAT,
+            borderwidth=1,
+            padding=6,
+        )
+        self._style.map(
+            "TButton",
+            background=[
+                ("active", t.button_active_bg),
+                ("pressed", t.button_active_bg),
+                ("disabled", t.surface)
+            ],
+            foreground=[
+                ("active", t.fg),
+                ("disabled", f"{t.fg}80")
+            ],
+        )
+        
+        # Primary button style (for important actions)
+        self._style.configure(
+            "Primary.TButton",
+            font=("Helvetica", 12, "bold"),
+            background=t.primary,
+            foreground=t.fg,
+            relief=tk.RAISED,
+            borderwidth=2,
+            padding=8,
+        )
+        self._style.map(
+            "Primary.TButton",
+            background=[
+                ("active", t.secondary),
+                ("pressed", t.secondary),
+                ("disabled", f"{t.primary}80")
+            ],
+        )
+        
+        # Label styles
+        self._style.configure(
+            "TLabel",
+            background=t.bg,
+            foreground=t.fg,
+            font=("Helvetica", 10),
+            padding=2,
+        )
+        
+        # Frame styles
+        self._style.configure(
+            "TFrame",
+            background=t.bg,
+        )
+        
+        # Entry styles
+        self._style.configure(
+            "TEntry",
+            fieldbackground=t.surface,
+            foreground=t.fg,
+            insertcolor=t.fg,
+            borderwidth=1,
+            padding=5,
+        )
+        self._style.map(
+            "TEntry",
+            fieldbackground=[("readonly", t.bg)],
+            foreground=[("readonly", t.fg)],
+            bordercolor=[("focus", t.primary)],
+            highlightcolor=[("focus", t.primary)],
+        )
+        
+        # Combobox styles
+        self._style.configure(
+            "TCombobox",
+            fieldbackground=t.surface,
+            foreground=t.fg,
+            selectbackground=t.primary,
+            selectforeground=t.fg,
+            arrowsize=12,
+            padding=5,
+        )
+        self._style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", t.surface)],
+            foreground=[("readonly", t.fg)],
+            selectbackground=[("readonly", t.primary)],
+            selectforeground=[("readonly", t.fg)],
+            arrowcolor=[("", t.fg)],
+        )
+        
+        # Scrollbar styles
+        self._style.configure(
+            "TScrollbar",
+            background=t.surface,
+            troughcolor=t.bg,
+            borderwidth=0,
+            arrowsize=12,
+        )
+        self._style.map(
+            "TScrollbar",
+            background=[("active", t.primary)],
+            arrowcolor=[("", t.fg)],
+        )
+        
+        # Progressbar styles
+        self._style.configure(
+            "TProgressbar",
+            background=t.primary,
+            troughcolor=t.surface,
+            bordercolor=t.bg,
+            lightcolor=t.primary,
+            darkcolor=t.primary,
+            borderwidth=0,
+        )
+        
+        # Notebook styles
+        self._style.configure(
+            "TNotebook",
+            background=t.bg,
+            borderwidth=0,
+        )
+        self._style.configure(
+            "TNotebook.Tab",
+            background=t.surface,
+            foreground=t.fg,
+            padding=[10, 5],
+            borderwidth=1,
+        )
+        self._style.map(
+            "TNotebook.Tab",
+            background=[("selected", t.bg), ("active", t.button_active_bg)],
+            expand=[("selected", [1, 1, 1, 0])],
+        )
+        
+        # Configure the root window
+        self._root.configure(bg=t.bg)
+        
+        # Apply the theme to tooltips if they exist
+        if hasattr(self, '_update_tooltip_colors'):
+            self._update_tooltip_colors()
+            
+        Returns:
+            Dictionary containing theme data.
+        """
+        if theme_name is None:
+            theme_name = self._current_theme
+        
+        # Handle system theme
+        if theme_name.lower() == 'system':
+            theme_name = 'dark' if self._system_dark else 'default'
+        
+        # Return the theme if it exists, otherwise return the default theme
+        return self._themes.get(theme_name.lower(), self.DEFAULT_THEME)
+    
+    def set_theme(self, theme_name: str) -> bool:
+        """Set the current theme.
+        
+        Args:
+            theme_name: Name of the theme to set.
+            
+        Returns:
+            bool: True if the theme was set successfully, False otherwise.
+        """
+        if theme_name.lower() == 'system' or theme_name.lower() in self._themes:
+            self._current_theme = theme_name.lower()
+            return True
+        return False
+    
+    def apply_theme(self, root: tk.Tk) -> None:
+        """Apply the current theme to a Tkinter root window.
+        
+        Args:
+            root: The Tkinter root window to apply the theme to.
+        """
+        theme = self.get_theme()
+        
+        # Set the application appearance mode
+        if theme.get('type') == 'dark' or (self._current_theme == 'system' and self._system_dark):
+            ctk.set_appearance_mode("dark")
+        else:
+            ctk.set_appearance_mode("light")
+        
+        # Set the color theme
+        colors = theme.get('colors', {})
+        
+        # Map our theme colors to CustomTkinter's color theme
+        ctk.set_default_color_theme({
+            "CTk": {
+                "fg_color": [colors.get("background", "#F5F5F5"), colors.get("background", "#121212")],
+                "top_fg_color": [colors.get("surface", "#FFFFFF"), colors.get("surface", "#1E1E1E")],
+                "text_color": [colors.get("text_primary", "#000000"), colors.get("text_primary", "#FFFFFF")],
+                "text_color_disabled": [colors.get("text_disabled", "#9E9E9E"), colors.get("text_disabled", "#6D6D6D")],
+                "border_color": [colors.get("border", "#E0E0E0"), colors.get("border", "#3D3D3D")],
+                "hover_color": [colors.get("hover", "#00000005"), colors.get("hover", "#FFFFFF05")],
+                "button_color": [colors.get("primary", "#4CAF50"), colors.get("primary", "#4CAF50")],
+                "button_hover_color": [colors.get("primary_dark", "#388E3C"), colors.get("primary_dark", "#388E3C")],
+                "button_text_color": [colors.get("on_primary", "#000000"), colors.get("on_primary", "#000000")],
+                "button_border_color": [colors.get("border", "#E0E0E0"), colors.get("border", "#3D3D3D")],
+                "input_fg_color": [colors.get("surface", "#FFFFFF"), colors.get("surface", "#1E1E1E")],
+                "input_border_color": [colors.get("border", "#E0E0E0"), colors.get("border", "#3D3D3D")],
+                "input_text_color": [colors.get("text_primary", "#000000"), colors.get("text_primary", "#FFFFFF")],
+                "dropdown_fg_color": [colors.get("surface", "#FFFFFF"), colors.get("surface", "#1E1E1E")],
+                "dropdown_hover_color": [colors.get("hover", "#00000005"), colors.get("hover", "#FFFFFF05")],
+                "dropdown_text_color": [colors.get("text_primary", "#000000"), colors.get("text_primary", "#FFFFFF")],
+                "scrollbar_button_color": [colors.get("border", "#E0E0E0"), colors.get("border", "#3D3D3D")],
+                "scrollbar_button_hover_color": [colors.get("hover", "#00000010"), colors.get("hover", "#FFFFFF10")],
+                "label_text_color": [colors.get("text_primary", "#000000"), colors.get("text_primary", "#FFFFFF")],
+                "checkbox_border_color": [colors.get("border", "#E0E0E0"), colors.get("border", "#3D3D3D")],
+                "checkbox_hover_color": [colors.get("hover", "#00000005"), colors.get("hover", "#FFFFFF05")],
+                "checkbox_text_color": [colors.get("text_primary", "#000000"), colors.get("text_primary", "#FFFFFF")],
+                "progress_bar_color": [colors.get("primary", "#4CAF50"), colors.get("primary", "#4CAF50")],
+                "progress_bar_border_color": [colors.get("border", "#E0E0E0"), colors.get("border", "#3D3D3D")],
+                "slider_button_color": [colors.get("primary", "#4CAF50"), colors.get("primary", "#4CAF50")],
+                "slider_button_hover_color": [colors.get("primary_dark", "#388E3C"), colors.get("primary_dark", "#388E3C")],
+                "slider_progress_color": [colors.get("primary_light", "#81C784"), colors.get("primary_light", "#81C784")],
+                "slider_border_color": [colors.get("border", "#E0E0E0"), colors.get("border", "#3D3D3D")],
+                "switch_button_color": [colors.get("primary", "#4CAF50"), colors.get("primary", "#4CAF50")],
+                "switch_button_hover_color": [colors.get("primary_dark", "#388E3C"), colors.get("primary_dark", "#388E3C")],
+                "switch_border_color": [colors.get("border", "#E0E0E0"), colors.get("border", "#3D3D3D")],
+                "switch_text_color": [colors.get("text_primary", "#000000"), colors.get("text_primary", "#FFFFFF")],
+                "tabview_border_color": [colors.get("border", "#E0E0E0"), colors.get("border", "#3D3D3D")],
+                "tabview_tab_text_color": [colors.get("text_primary", "#000000"), colors.get("text_primary", "#FFFFFF")],
+                "tabview_tab_color": [colors.get("surface", "#FFFFFF"), colors.get("surface", "#1E1E1E")],
+                "tabview_tab_hover_color": [colors.get("hover", "#00000005"), colors.get("hover", "#FFFFFF05")],
+                "tabview_tab_selected_color": [colors.get("primary", "#4CAF50"), colors.get("primary", "#4CAF50")],
+                "tabview_tab_selected_hover_color": [colors.get("primary_dark", "#388E3C"), colors.get("primary_dark", "#388E3C")],
+                "tabview_tab_text_selected_color": [colors.get("on_primary", "#000000"), colors.get("on_primary", "#000000")],
+            }
+        })
+        
+        # Apply font settings
+        font_family = ", ".join(theme.get('fonts', {}).get('family', ["Segoe UI", "Arial", "sans-serif"]))
+        font_sizes = theme.get('fonts', {})
+        
+        ctk.ThemeManager.theme["CTkFont"] = {
+            "family": font_family,
+            "size": font_sizes.get("size_medium", 12),
+            "weight": font_sizes.get("weight_normal", "normal"),
+        }
+        
+        ctk.ThemeManager.theme["CTkFont"]["small"] = {
+            "family": font_family,
+            "size": font_sizes.get("size_small", 10),
+            "weight": font_sizes.get("weight_normal", "normal"),
+        }
+        
+        ctk.ThemeManager.theme["CTkFont"]["large"] = {
+            "family": font_family,
+            "size": font_sizes.get("size_large", 14),
+            "weight": font_sizes.get("weight_normal", "normal"),
+        }
+        
+        ctk.ThemeManager.theme["CTkFont"]["title"] = {
+            "family": font_family,
+            "size": font_sizes.get("size_title", 16),
+            "weight": font_sizes.get("weight_bold", "bold"),
+        }
+        
+        ctk.ThemeManager.theme["CTkFont"]["large_title"] = {
+            "family": font_family,
+            "size": font_sizes.get("size_large_title", 20),
+            "weight": font_sizes.get("weight_bold", "bold"),
+        }
+        
+        # Update all widgets
+        for widget in root.winfo_children():
+            try:
+                if hasattr(widget, "configure"):
+                    widget.configure()
+            except Exception as e:
+                logger.warning(f"Failed to update widget {widget}: {e}")
+
+# Global theme manager instance
+theme_manager = ThemeManager()
+
+def get_theme_manager() -> ThemeManager:
+    """Get the global theme manager instance."""
+    return theme_manager

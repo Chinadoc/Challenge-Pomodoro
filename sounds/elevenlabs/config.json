@@ -1,0 +1,16 @@
+{
+  "name": "ElevenLabs Voice Pack",
+  "version": "1.0.0",
+  "author": "Custom Generated",
+  "description": "Natural-sounding voice prompts generated with ElevenLabs API",
+  "sounds": {
+    "work_start": "work_start.mp3",
+    "work_end": "work_end.mp3",
+    "break_start": "break_start.mp3",
+    "break_end": "break_end.mp3",
+    "pause": "pause.mp3",
+    "resume": "resume.mp3",
+    "notification": "notification.mp3",
+    "achievement": "achievement.mp3"
+  }
+}
